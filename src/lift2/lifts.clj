@@ -7,6 +7,16 @@
 (defn comparator-fn? [form]
   (#{'= '> '< '<= '>=} form))
 
+(def nlifts 2)
+(def nfloors 5)
+
+(defrecord Lift [at-floor assigned-direction moving? stopping-at people])
+
+;; ':floors' is a vector of vectors of people waiting on each floor (represented by the floor numbers they wish to move to)
+(def building
+  {:floors (apply vector (for [_ (range nfloors)] (ref [])))
+   :lifts (apply vector (for [_ (range nlifts)] (ref (Lift. 0 :none false #{} []))))})
+
 (defmacro lift-is [& requirements]
   (when-not (even? (count requirements)) (throw (IllegalArgumentException. "Must supply an even number of forms to lift-is")))
   (let [state (gensym 'state)
@@ -42,7 +52,12 @@
         [previous new]
         (recur)))))
 
-(defn configure-building [lifts]
+#_(defn configure-building []
+  (dosync
+    (dotimes [_ nlifts]
+      (alter (:lifts building) conj (Lift. 0 :none false #{} [])))))
+
+#_(defn configure-building [lifts]
   {:floor-state (atom {})
    :lifts       (for [lift (range lifts)]
                   (let [state (atom {:at-floor 0
@@ -73,7 +88,7 @@
                                       (swap! state (fn [{:keys [people stopping-at] :as current-state}]
                                                      (assoc current-state :people (conj people going-to) :stopping-at (conj stopping-at going-to)))))}))})
 
-(def building (configure-building 3))
+#_(def building (configure-building 3))
 
 (defn divide
   "Returns a vector of sequences, the first element are those that satisfy the predicate, the second element are those that do not"
@@ -90,7 +105,7 @@
       (lazy-cat pass (apply sieve fail (rest preds))))
     coll))
 
-(defn summon
+#_(defn summon
   "Simluate a person who wants to go from 'floor' to 'going-to' pressing the appropriate 'up' or 'down' button to summon
   a lift. When a lift arrives that is going in the correct direction the person will enter the lift (regardless of
   whether it was the one originanly summoned) and then press the appripriate floor button on the lift panel."
@@ -107,3 +122,32 @@
                                                 :direction (or direction-required :unassigned))))]
           (when-not ((:request-stop ideal-lift) floor direction-required)
             (recur)))))))
+
+(defn direction-required [floor going-to]
+  (cond
+    (< floor going-to) :up
+    (> floor going-to) :down))
+
+(defn select-lift [lifts floor direction-required]
+  (dosync
+    (first (sieve lifts
+                  ;; TODO: Add predicates to select most appropriate lift
+                  ))))
+
+(defn add-stop [lift floor]
+  ;; TODO: need to tell lift it might need to start moving
+  (assoc lift :stopping-at floor))
+
+(defn add-person
+  "Simluate a person who wants to go from 'floor' to 'going-to' pressing the appropriate 'up' or 'down' button to summon
+  a lift. When a lift arrives that is going in the correct direction the person will enter the lift (regardless of
+  whether it was the one originanly summoned) and then press the appripriate floor button on the lift panel."
+  [floor going-to]
+  (let [direction-required (direction-required floor going-to)]
+    (when direction-required
+      (dosync
+        (let [ppl-waiting-at-this-floor (get-in building [:floors floor])]
+          (when-not (some #(= direction-required (direction-required floor %1)) @ppl-waiting-at-this-floor)
+            (let [lift (select-lift (:lifts building) floor direction-required)]
+              (alter lift add-stop floor)))
+          (alter ppl-waiting-at-this-floor conj going-to))))))
