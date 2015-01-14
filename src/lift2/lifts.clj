@@ -2,6 +2,12 @@
   (:import (java.util.concurrent LinkedBlockingQueue))
   (require [clojure.core.async :as as]))
 
+#_ (
+(ns lift2.lifts)
+(clojure.pprint/pprint building)
+(add-person 1 0)
+)
+
 (defn equality-check [key state value]
   `(= (~key ~state) ~value))
 
@@ -11,12 +17,12 @@
 (def nlifts 1)
 (def nfloors 2)
 
-(defrecord Lift [queue at-floor assigned-direction stopping-at people])
+(defrecord Lift [at-floor assigned-direction stopping-at people])
 
 ;; ':floors' is a vector of vectors of people waiting on each floor (represented by the floor numbers they wish to move to)
 (def building
   {:floors (apply vector (for [_ (range nfloors)] (ref [])))
-   :lifts (apply vector (for [_ (range nlifts)] (ref (Lift. (LinkedBlockingQueue.) 0 nil #{} []))))})
+   :lifts (apply vector (for [_ (range nlifts)] (agent (Lift. 0 nil #{} []))))})
 
 (defn direction-required [floor going-to]
   (cond
@@ -25,12 +31,6 @@
 
 (defn send-or-fail [queue message]
   (.put queue message))
-
-(defn add-stop [lift floor]
-  ;; TODO: need to tell lift it might need to start moving
-  (if (:assigned-direction lift)
-    (assoc lift :stopping-at floor)
-    (assoc lift :stopping-at floor :assigned-direction (direction-required (:at-floor lift) floor))))
 
 (defn divide
   "Returns a vector of sequences, the first element are those that satisfy the predicate, the second element are those that do not"
@@ -46,21 +46,25 @@
     (fn [floor] (= direction (direction-required relative-floor floor)))
     (constantly false)))
 
-(defn opposite-direction [direction] (if (= direction :up) :down :up))
-
-(defn remove-people [people-waiting people-to-remove]
-  (apply vector (remove (into #{} people-to-remove) people-waiting)))
-
 (defn half-way? [floor] (odd? (/ floor 1/2)))
 
 (defn calculate-new-floor [current-floor direction]
   ((if (= :up direction) + -) current-floor 1/2))
 
+(defn opposite-direction [direction] (if (= direction :up) :down :up))
+
+(defn remove-people [people-waiting people-to-remove]
+  (apply vector (remove (into #{} people-to-remove) people-waiting)))
+
+
 (defn lift-behaviour [lift]
-  (let [{:keys [queue at-floor assigned-direction moving? stopping-at people]} lift
+  (let [{:keys [at-floor assigned-direction stopping-at people]} lift
         [people-staying people-disembarking] (divide (partial = at-floor) people)
         new-stopping-at (disj stopping-at at-floor)
         stopping-here? (stopping-at at-floor)]
+    (if stopping-here?
+      (Thread/sleep 2000)
+      (Thread/sleep 1000))
     (dosync
       (let [;; Lift behaviour without interaction from people
             [stopping-at-current-direction stopping-at-opposite-direction] (divide (is-going assigned-direction at-floor) new-stopping-at)
@@ -85,29 +89,34 @@
                           (calculate-new-floor at-floor new-assigned-direction))
                         at-floor)
             ;; Time to wait until next motion
-            pause (when new-assigned-direction
-                    (cond
-                      stopping-here? 2
-                      (half-way? new-floor) 5
-                      :else 0))]
-        (when pause (send-or-fail queue pause))
+            #_ (pause (when new-assigned-direction
+                      (cond
+                        stopping-here? 2
+                        (half-way? new-floor) 5
+                        :else 0)))
+            new-lift-state (assoc lift
+                                  :assigned-direction new-assigned-direction
+                                  :stopping-at (clojure.set/union new-stopping-at (into #{} people-joining))
+                                  :people (concat people-staying people-joining)
+                                  :at-floor new-floor)
+            _ (println "old lift state" lift)
+            _ (println "new lift state" new-lift-state)]
         (when (seq people-joining)
-          (alter people-waiting remove-people people-joining))
-        (assoc lift
-               :assigned-direction new-assigned-direction
-               :stopping-at (clojure.set/union new-stopping-at (into #{} people-joining))
-               :people (concat people-staying people-joining))))))
+          (alter people-waiting-ref remove-people people-joining))
+        (when (:assigned-direction new-lift-state) (send-off *agent* #'lift-behaviour))
+        new-lift-state))))
+
+(defn add-stop [lift floor]
+  ;; TODO: need to tell lift it might need to start moving
+  (if (:assigned-direction lift)
+    (assoc lift :stopping-at (conj (:stopping-at lift) floor))
+    (do
+      (send-off *agent* #'lift-behaviour)
+      (assoc lift :stopping-at (conj (:stopping-at lift) floor) :assigned-direction (direction-required (:at-floor lift) floor)))))
 
 (defn start-lifts []
   (dorun
-    (for [lift (:lifts building)]
-      (as/thread
-        (loop []
-          (when-let [pause (as/<!! (:chan @lift))]
-            (Thread/sleep (* pause 1000))
-            (dosync
-              (alter lift lift-behaviour))
-            (recur)))))))
+    (map #(send-off % lift-behaviour) (:lifts building))))
 
 (defmacro lift-is [& requirements]
   (when-not (even? (count requirements)) (throw (IllegalArgumentException. "Must supply an even number of forms to lift-is")))
@@ -123,26 +132,12 @@
     `(fn [~state]
        (and ~@body))))
 
-#_(defn add-stop
-  ([state floor] (assoc state :stopping-at (conj (:stopping-at state) floor)))
-  ([state floor direction] (assoc state :stopping-at (conj (:stopping-at state) floor) :direction direction)))
-
 (defn valid-to-request [current-state requested-floor requested-direction]
   (let [floor-comparator (if (= requested-direction :up) <= >=)
         {:keys [direction at-floor]} current-state]
     (or (and (= direction requested-direction)
              (floor-comparator at-floor requested-floor))
         (= direction :unassigned))))
-
-(defn pn-swap!
-  "Like swap! but returns the previous and new versions of the atom in a vector, [p n]"
-  [atom f & args]
-  (loop []
-    (let [previous @atom
-          new (apply f previous args)]
-      (if (compare-and-set! atom previous new)
-        [previous new]
-        (recur)))))
 
 (defn sieve
   "Takes a collection and a number of predicates. Returns the collection reordered with elements that pass the first
@@ -171,5 +166,5 @@
         (let [ppl-waiting-at-this-floor (get-in building [:floors floor])]
           (when-not (some #(= direction-required (direction-required floor %1)) @ppl-waiting-at-this-floor)
             (let [lift (select-lift (:lifts building) floor direction-required)]
-              (alter lift add-stop floor)))
+              (send-off lift add-stop floor)))
           (alter ppl-waiting-at-this-floor conj going-to))))))
