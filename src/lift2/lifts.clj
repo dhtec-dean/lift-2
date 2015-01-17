@@ -2,12 +2,6 @@
   (:import (java.util.concurrent LinkedBlockingQueue))
   (require [clojure.core.async :as as]))
 
-#_ (
-(ns lift2.lifts)
-(clojure.pprint/pprint building)
-(add-person 1 0)
-)
-
 (defn equality-check [key state value]
   `(= (~key ~state) ~value))
 
@@ -17,12 +11,12 @@
 (def nlifts 1)
 (def nfloors 2)
 
-(defrecord Lift [at-floor assigned-direction stopping-at people])
+(defrecord Lift [nlift at-floor assigned-direction stopping-at people])
 
 ;; ':floors' is a vector of vectors of people waiting on each floor (represented by the floor numbers they wish to move to)
 (def building
   {:floors (apply vector (for [_ (range nfloors)] (ref [])))
-   :lifts (apply vector (for [_ (range nlifts)] (agent (Lift. 0 nil #{} []))))})
+   :lifts (apply vector (for [nlift (range nlifts)] (agent (Lift. nlift 0 nil #{} []))))})
 
 (defn direction-required [floor going-to]
   (cond
@@ -58,8 +52,8 @@
 
 
 (defn lift-behaviour [lift]
-  (let [{:keys [at-floor assigned-direction stopping-at people]} lift
-        [people-staying people-disembarking] (divide (partial = at-floor) people)
+  (let [{:keys [nlift at-floor assigned-direction stopping-at people]} lift
+        [people-disembarking people-staying] (divide (partial = at-floor) people)
         new-stopping-at (disj stopping-at at-floor)
         stopping-here? (stopping-at at-floor)]
     (if stopping-here?
@@ -88,21 +82,16 @@
                             (calculate-new-floor at-floor new-assigned-direction))
                           (calculate-new-floor at-floor new-assigned-direction))
                         at-floor)
-            ;; Time to wait until next motion
-            #_ (pause (when new-assigned-direction
-                      (cond
-                        stopping-here? 2
-                        (half-way? new-floor) 5
-                        :else 0)))
             new-lift-state (assoc lift
                                   :assigned-direction new-assigned-direction
                                   :stopping-at (clojure.set/union new-stopping-at (into #{} people-joining))
                                   :people (concat people-staying people-joining)
-                                  :at-floor new-floor)
-            _ (println "old lift state" lift)
-            _ (println "new lift state" new-lift-state)]
+                                  :at-floor new-floor)]
         (when (seq people-joining)
           (alter people-waiting-ref remove-people people-joining))
+        (if (or (seq people-disembarking) (seq people-joining))
+          (println "Lift" nlift "has waited at floor" (str at-floor) "while" (count people-joining) "people join and" (count people-disembarking) "people leave")
+          (when (:assigned-direction new-lift-state) (println "Lift" nlift "has moved" (:assigned-direction new-lift-state) "from floor" (str at-floor) "to" (str (:at-floor new-lift-state)))))
         (when (:assigned-direction new-lift-state) (send-off *agent* #'lift-behaviour))
         new-lift-state))))
 
