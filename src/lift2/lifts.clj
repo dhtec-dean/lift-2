@@ -8,15 +8,15 @@
 (defn comparator-fn? [form]
   (#{'= '> '< '<= '>=} form))
 
-(def nlifts 1)
-(def nfloors 2)
+(def nlifts 2)
+(def nfloors 3)
 
 (defrecord Lift [nlift at-floor assigned-direction stopping-at people])
 
 ;; ':floors' is a vector of vectors of people waiting on each floor (represented by the floor numbers they wish to move to)
 (def building
   {:floors (apply vector (for [_ (range nfloors)] (ref [])))
-   :lifts (apply vector (for [nlift (range nlifts)] (agent (Lift. nlift 0 nil #{} []))))})
+   :lifts (apply vector (for [nlift (range nlifts)] (agent (Lift. (inc nlift) 0 nil #{} []))))})
 
 (defn direction-required [floor going-to]
   (cond
@@ -49,7 +49,6 @@
 
 (defn remove-people [people-waiting people-to-remove]
   (apply vector (remove (into #{} people-to-remove) people-waiting)))
-
 
 (defn lift-behaviour [lift]
   (let [{:keys [nlift at-floor assigned-direction stopping-at people]} lift
@@ -91,7 +90,12 @@
           (alter people-waiting-ref remove-people people-joining))
         (if (or (seq people-disembarking) (seq people-joining))
           (println "Lift" nlift "has waited at floor" (str at-floor) "while" (count people-joining) "people join and" (count people-disembarking) "people leave")
-          (when (:assigned-direction new-lift-state) (println "Lift" nlift "has moved" (:assigned-direction new-lift-state) "from floor" (str at-floor) "to" (str (:at-floor new-lift-state)))))
+          (when (:assigned-direction new-lift-state)
+            (if (half-way? (:at-floor new-lift-state))
+              (println "Lift" nlift "is moving" (:assigned-direction new-lift-state) "from floor" (str at-floor) "to" (str (if (= (:assigned-direction new-lift-state) :up)
+                                                                                                                             (inc at-floor)
+                                                                                                                             (dec at-floor))))
+              (println "Lift" nlift "is at floor" (str (:at-floor new-lift-state))))))
         (when (:assigned-direction new-lift-state) (send-off *agent* #'lift-behaviour))
         new-lift-state))))
 
@@ -107,26 +111,23 @@
   (dorun
     (map #(send-off % lift-behaviour) (:lifts building))))
 
-(defmacro lift-is [& requirements]
-  (when-not (even? (count requirements)) (throw (IllegalArgumentException. "Must supply an even number of forms to lift-is")))
-  (let [state (gensym 'state)
-        body (for [[key value] (partition 2 requirements)]
-               (if (coll? value)
-                 (if (comparator-fn? (first value))
-                   (concat [(first value)] [(list key state)] (rest value))
-                   (let [expressions (for [v (rest value)]
-                                       (equality-check key state v))]
-                     `(~(first value) ~@expressions)))
-                 (equality-check key state value)))]
-    `(fn [~state]
-       (and ~@body))))
+(defn splice [seq item position]
+  (lazy-cat (take position seq) [item] (drop position seq)))
 
-(defn valid-to-request [current-state requested-floor requested-direction]
-  (let [floor-comparator (if (= requested-direction :up) <= >=)
-        {:keys [direction at-floor]} current-state]
-    (or (and (= direction requested-direction)
-             (floor-comparator at-floor requested-floor))
-        (= direction :unassigned))))
+(defn lift-is [& {rat-floor :at-floor rdirection :direction rstopping-at :stopping-at}]
+  (fn [lift-agent]
+    (let [{:keys [at-floor assigned-direction stopping-at] :as as} @lift-agent]
+      (and (if rat-floor
+             (if (coll? rat-floor)
+               (eval (apply list (splice rat-floor at-floor 1)))
+               (= rat-floor at-floor))
+             true)
+           (if rdirection
+             (= rdirection assigned-direction)
+             true)
+           (if rstopping-at
+             (stopping-at rstopping-at)
+             true)))))
 
 (defn sieve
   "Takes a collection and a number of predicates. Returns the collection reordered with elements that pass the first
@@ -135,14 +136,21 @@
   [coll & preds]
   (if (seq preds)
     (let [[pass fail] (divide (first preds) coll)]
+      (println "sieving." (count pass) "passed" (count fail) "to check next")
       (lazy-cat pass (apply sieve fail (rest preds))))
     coll))
 
 (defn select-lift [lifts floor direction-required]
   (dosync
     (first (sieve lifts
-                  ;; TODO: Add predicates to select most appropriate lift
-                  ))))
+                  (lift-is :at-floor floor :direction direction-required)
+                  (lift-is :at-floor floor :direction nil)
+                  (if (= direction-required :up)
+                    (lift-is :at-floor [< floor] :direction :up :stopping-at floor)
+                    (lift-is :at-floor [> floor] :direction :down :stopping-at floor))
+                  (if (= direction-required :up)
+                    (lift-is :at-floor [< floor] :direction :up)
+                    (lift-is :at-floor [> floor] :direction :down))))))
 
 (defn add-person
   "Simluate a person who wants to go from 'floor' to 'going-to' pressing the appropriate 'up' or 'down' button to summon
